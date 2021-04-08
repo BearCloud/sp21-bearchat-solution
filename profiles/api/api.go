@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -42,6 +43,13 @@ func getProfile(w http.ResponseWriter, r *http.Request) {
 	// Scan the information into the profile struct's variables
 	// Remember to pass in the address!
 	err := DB.QueryRow("SELECT * FROM users WHERE uuid=?", uuid).Scan(&p.Firstname, &p.Lastname, &p.Email, &p.UUID)
+
+	// If we could not find any users in the database with this UUID,
+	// return a BadRequest.
+	if err == sql.ErrNoRows {
+		http.Error(w, "could not find a user with that UUID", http.StatusBadRequest)
+		return
+	}
 
 	// Check for errors with querying the database
 	// Return an Internal Server Error if such an error occurs
@@ -88,17 +96,16 @@ func updateProfile(w http.ResponseWriter, r *http.Request) {
 
 	// Insert the profile data into the users table
 	// Check db-server/initdb.sql for the scheme
-	// Make sure to use REPLACE INTO (as covered in the SQL homework)
+	// Make sure to use REPLACE INTO
 	result, err := DB.Exec("REPLACE INTO users VALUES (?, ?, ?, ?)", p.Firstname, p.Lastname, p.Email, p.UUID)
+
+	// Check that some row was actually affected by this query. If nothing was, then
+	// that means no user
 
 	// Return an internal server error if any errors occur when querying the database.
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Println(err.Error())
 		return
-	}
-
-	if r, err := result.RowsAffected(); r < 1 || err != nil {
-		http.Error(w, "there was an error updating your profile", http.StatusBadRequest)
 	}
 }

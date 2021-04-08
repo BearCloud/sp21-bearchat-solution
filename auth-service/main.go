@@ -31,6 +31,7 @@ func main() {
 	// Create a new mux for routing api calls
 	router := mux.NewRouter()
 	router.Use(CORS)
+	router.Methods(http.MethodOptions)
 
 	err = api.RegisterRoutes(router)
 	if err != nil {

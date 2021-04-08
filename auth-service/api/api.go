@@ -23,12 +23,12 @@ const (
 
 // RegisterRoutes initializes the api endpoints and maps the requests to specific functions
 func RegisterRoutes(router *mux.Router) error {
-	router.HandleFunc("/api/auth/signup", signup).Methods(http.MethodPost, http.MethodOptions)
-	router.HandleFunc("/api/auth/signin", signin).Methods(http.MethodPost, http.MethodOptions)
-	router.HandleFunc("/api/auth/logout", logout).Methods(http.MethodPost, http.MethodOptions)
-	router.HandleFunc("/api/auth/verify", verify).Methods(http.MethodPost, http.MethodOptions)
-	router.HandleFunc("/api/auth/sendreset", sendReset).Methods(http.MethodPost, http.MethodOptions)
-	router.HandleFunc("/api/auth/resetpw", resetPassword).Methods(http.MethodPost, http.MethodOptions)
+	router.HandleFunc("/api/auth/signup", signup).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/signin", signin).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/logout", logout).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/verify", verify).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/sendreset", sendReset).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/resetpw", resetPassword).Methods(http.MethodPost)
 
 	// Load sendgrid credentials
 	err := godotenv.Load()

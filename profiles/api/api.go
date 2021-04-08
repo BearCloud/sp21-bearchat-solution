@@ -9,8 +9,8 @@ import (
 )
 
 func RegisterRoutes(router *mux.Router) {
-	router.HandleFunc("/api/profile/{uuid}", getProfile).Methods(http.MethodGet, http.MethodOptions)
-	router.HandleFunc("/api/profile/{uuid}", updateProfile).Methods(http.MethodPut, http.MethodOptions)
+	router.HandleFunc("/api/profile/{uuid}", getProfile).Methods(http.MethodGet)
+	router.HandleFunc("/api/profile/{uuid}", updateProfile).Methods(http.MethodPut)
 }
 
 func getUUID(w http.ResponseWriter, r *http.Request) (uuid string, err error) {

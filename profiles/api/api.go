@@ -97,10 +97,7 @@ func updateProfile(w http.ResponseWriter, r *http.Request) {
 	// Insert the profile data into the users table
 	// Check db-server/initdb.sql for the scheme
 	// Make sure to use REPLACE INTO
-	result, err := DB.Exec("REPLACE INTO users VALUES (?, ?, ?, ?)", p.Firstname, p.Lastname, p.Email, p.UUID)
-
-	// Check that some row was actually affected by this query. If nothing was, then
-	// that means no user
+	_, err = DB.Exec("REPLACE INTO users VALUES (?, ?, ?, ?)", p.Firstname, p.Lastname, p.Email, p.UUID)
 
 	// Return an internal server error if any errors occur when querying the database.
 	if err != nil {

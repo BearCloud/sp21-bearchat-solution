@@ -148,7 +148,7 @@ func TestSignup(t *testing.T) {
 
 		// Check that the user was given an access_token and a refresh_token.
 		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "too many cookies returned") {
+		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
 			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
 			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
 			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")

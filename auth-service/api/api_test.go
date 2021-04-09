@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -40,6 +43,16 @@ func clearDatabase(db *sql.DB) (err error) {
 	return err
 }
 
+func TestMain(m *testing.M) {
+	// Makes it so any log statements are discarded. Comment these two lines
+	// if you want to see the logs.
+	log.SetFlags(0)
+	log.SetOutput(io.Discard)
+
+	// Runs the tests to completion then exits.
+	os.Exit(m.Run())
+}
+
 // Contains the tests for signing up to Bearchat.
 func TestSignup(t *testing.T) {
 	testCreds := Credentials{
@@ -50,14 +63,14 @@ func TestSignup(t *testing.T) {
 	testCredsJson, err := json.Marshal(testCreds)
 
 	// Makes sure the error returned here is nil.
-	require.Nil(t, err, "failed to initialize test credentials %s", err)
+	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
 
 	// Connects to the MySQL Docker Container. Notice that we use localhost
 	// instead of the container's IP address since it is assumed these
 	// tests run outside of the container network.
 	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
 
-	require.Nil(t, err, "failed to initialize database connection %s", err)
+	require.NoErrorf(t, err, "failed to initialize database connection")
 
 	// Runs a basic signup test using a mock database connection (meaning no database needs to be
 	// started to run this test).
@@ -65,7 +78,7 @@ func TestSignup(t *testing.T) {
 		// Makes a new mock connection to the database. Now we don't have to start
 		// an actual database server to test the code and we don't have to clean up!
 		DB, mock, err := sqlmock.New()
-		require.Nil(t, err, "an error '%s' was not expected when opening a stub database connection", err)
+		require.NoError(t, err, "an error was not expected when opening a stub database connection")
 		defer DB.Close()
 
 		// Makes a Mailer that will record whether or not SendEmail was called.
@@ -89,15 +102,15 @@ func TestSignup(t *testing.T) {
 		signup(m, DB)(rr, r)
 
 		// First make sure that the request was given the proper status code.
-		assert.Equal(t, http.StatusCreated, rr.Result().StatusCode, "expected status code %d but got %d", http.StatusCreated, rr.Result().StatusCode)
+		assert.Equal(t, http.StatusCreated, rr.Result().StatusCode, "incorrect status code returned")
 
 		// Make sure everything is good with regards to SQL queries.
 		err = mock.ExpectationsWereMet()
-		assert.Nil(t, err, err)
+		assert.NoError(t, err, "make sure you're checking if there are conflicts and inserting the user properly")
 
 		// Check that the user was given an access_token and a refresh_token.
 		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "too many cookies returned") {
+		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
 			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
 			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
 			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
@@ -117,11 +130,11 @@ func TestSignup(t *testing.T) {
 
 		// Make sure we're connected to the SQL database.
 		err = MySQLDB.Ping()
-		require.Nil(t, err, "could not connect to DB %s", err)
+		require.NoError(t, err, "could not connect to DB")
 
 		// Make sure we're able to clear the database for this test.
 		err = clearDatabase(MySQLDB)
-		require.Nil(t, err, "could not clear database %s", err)
+		require.NoError(t, err, "could not clear database")
 
 		// Call the function with our fake stuff.
 		signup(m, MySQLDB)(rr, r)
@@ -129,8 +142,9 @@ func TestSignup(t *testing.T) {
 		// Make sure the database has an entry for our new user.
 		var exists bool
 		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		assert.Nil(t, err, "an error occurred while checking the database %s", err)
-		assert.True(t, exists, "could not find the user in the database after signing up")
+		if assert.NoError(t, err, "an error occurred while checking the database") {
+			assert.True(t, exists, "could not find the user in the database after signing up")
+		}
 
 		// Check that the user was given an access_token and a refresh_token.
 		cookies := rr.Result().Cookies()

@@ -59,7 +59,7 @@ func signup(m Mailer, DB *sql.DB) http.HandlerFunc {
 		}
 
 		// Check if the email already exists
-		//err = DB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=?)", creds.Email).Scan(&exists)
+		err = DB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=?)", creds.Email).Scan(&exists)
 
 		// Check for error
 		if err != nil {

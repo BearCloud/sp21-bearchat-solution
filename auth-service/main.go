@@ -17,28 +17,27 @@ func main() {
 	}
 
 	// Initialize the sendgrid client
-	api.InitMailer()
+	mailer := api.NewSendGridMailer()
 
 	// Initialize our database connection
-	DB := api.InitDB()
-	defer DB.Close()
+	db := api.InitDB()
+	defer db.Close()
 
 	// Ping the database to make sure it's up
-	if err = DB.Ping(); err != nil {
-		log.Println("pinging database")
+	err = db.Ping()
+	if err != nil {
+		log.Println("Failed to ping database! Exiting with error...")
 		panic(err.Error())
 	}
+
 	// Create a new mux for routing api calls
 	router := mux.NewRouter()
 	router.Use(CORS)
 	router.Methods(http.MethodOptions)
 
-	err = api.RegisterRoutes(router)
-	if err != nil {
-		log.Fatal("Error registering API endpoints")
-	}
+	api.RegisterRoutes(router, mailer, db)
 
-	log.Println("starting auth-service server")
+	log.Println("starting go server")
 	http.ListenAndServe(":80", router)
 }
 
@@ -51,7 +50,7 @@ func CORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
-		if r.Method == "OPTIONS" {
+		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

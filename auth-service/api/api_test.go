@@ -186,13 +186,6 @@ func TestSignup(t *testing.T) {
 	// Makes sure the error returned here is nil.
 	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
 
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err = sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
 	t.Run("Test Duplicate Username", func(t *testing.T) {
 		// Make a fake request and response to probe the function with.
 		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
@@ -266,10 +259,11 @@ func TestSignup(t *testing.T) {
 			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
 		}
 
-		//Make request with duplicate username.
+		// Make request with duplicate username.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testDupEmailJson))
+		rr = httptest.NewRecorder()
 
-		//Signup with a duplicate username.
+		// Signup with a duplicate username.
 		signup(m, MySQLDB)(rr, r)
 
 		assert.Equal(t, http.StatusConflict, rr.Code, "incorrect status code returned")

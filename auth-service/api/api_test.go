@@ -40,7 +40,7 @@ func verifyCookie(c *http.Cookie) bool {
 
 func verifyLogoutCookie(c *http.Cookie) bool {
 	return (c.Name == "access_token" || c.Name == "refresh_token") &&
-		c.Expires.Before(time.Now()) &&
+		c.Expires.After(time.Now()) &&
 		c.Path == "/"
 }
 
@@ -220,6 +220,7 @@ func TestSignup(t *testing.T) {
 
 		//Make request with duplicate username.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testDupUserJson))
+		rr = httptest.NewRecorder()
 
 		//Signup with a duplicate username.
 		signup(m, MySQLDB)(rr, r)
@@ -321,14 +322,15 @@ func TestSignin(t *testing.T) {
 
 		//Let user sign in.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testCredsJson))
+		rr = httptest.NewRecorder()
 		signin(MySQLDB)(rr, r)
 
 		// Check that the user was given an access_token and a refresh_token.
 		cookies = rr.Result().Cookies()
-		if assert.Equal(t, 4, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[2]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[3]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[2].Name, cookies[3].Name, "two of the same cookie found")
+		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
+			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
+			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
+			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
 		}
 	})
 
@@ -375,6 +377,7 @@ func TestSignin(t *testing.T) {
 
 		//Let user sign in.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testEmailJson))
+		rr = httptest.NewRecorder()
 		signin(MySQLDB)(rr, r)
 
 		//Check correct status returned.
@@ -424,6 +427,7 @@ func TestSignin(t *testing.T) {
 
 		//Let user sign in.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testPassJson))
+		rr = httptest.NewRecorder()
 		signin(MySQLDB)(rr, r)
 
 		//Check correct status returned.
@@ -482,14 +486,15 @@ func TestLogout(t *testing.T) {
 
 		//Let user sign in.
 		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testCredsJson))
+		rr = httptest.NewRecorder()
 		signin(MySQLDB)(rr, r)
 
 		// Check that the user was given an access_token and a refresh_token.
 		cookies = rr.Result().Cookies()
-		if assert.Equal(t, 4, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyLogoutCookie(cookies[2]), "first cookie does not have proper attributes")
-			assert.True(t, verifyLogoutCookie(cookies[3]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[2].Name, cookies[3].Name, "two of the same cookie found")
+		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
+			assert.True(t, verifyLogoutCookie(cookies[0]), "first cookie does not have proper attributes")
+			assert.True(t, verifyLogoutCookie(cookies[1]), "second cookie does not have proper attributes")
+			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
 		}
 	})
 }

@@ -360,7 +360,7 @@ func resetPassword(DB *sql.DB) http.HandlerFunc {
 		username := credentials.Username
 		password := credentials.Password
 		var exists bool
-		err = DB.QueryRow("SELECT * FROM users WHERE username=? AND resetToken=?", username, token).Scan(&exists)
+		err = DB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE username=? AND resetToken=?)", username, token).Scan(&exists)
 
 		// Check for errors executing the query
 		if err != nil {

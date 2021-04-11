@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -162,6 +163,51 @@ func TestSignup(t *testing.T) {
 
 		// Lastly, make sure that the mailer was called to send an email.
 		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
+	})
+
+	//Test Multiple Signups
+	t.Run("Test Multiple Signups", func(t *testing.T) {
+		for i := 0; i < 10; i++ {
+			cred := Credentials{Username: strconv.Itoa(i), Email: strconv.Itoa(i), Password: strconv.Itoa(i)}
+
+			credJson, err := json.Marshal(cred)
+
+			// Makes sure the error returned here is nil.
+			require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
+
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(credJson))
+			rr := httptest.NewRecorder()
+			m := newRecordMailer()
+
+			// Make sure we're connected to the SQL database.
+			err = MySQLDB.Ping()
+			require.NoError(t, err, "could not connect to DB")
+
+			// Make sure we're able to clear the database for this test.
+			err = clearDatabase(MySQLDB)
+			require.NoError(t, err, "could not clear database")
+
+			// Call the function with our fake stuff.
+			signup(m, MySQLDB)(rr, r)
+
+			// Make sure the database has an entry for our new user.
+			var exists bool
+			err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", cred.Email, cred.Username).Scan(&exists)
+			if assert.NoError(t, err, "an error occurred while checking the database") {
+				assert.True(t, exists, "could not find the user in the database after signing up")
+			}
+
+			// Check that the user was given an access_token and a refresh_token.
+			cookies := rr.Result().Cookies()
+			if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
+				assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
+				assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
+				assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
+			}
+
+			// Lastly, make sure that the mailer was called to send an email.
+			assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
+		}
 	})
 
 	//Test Duplicates

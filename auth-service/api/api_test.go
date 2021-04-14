@@ -14,11 +14,522 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// TESTS
+
+func TestMain(m *testing.M) {
+	// Makes it so any log statements are discarded. Comment these two lines
+	// if you want to see the logs.
+	log.SetFlags(0)
+	log.SetOutput(io.Discard)
+
+	// Runs the tests to completion then exits.
+	os.Exit(m.Run())
+}
+
+// Runs every test that uses the database.
+func TestAll(t *testing.T) {
+	suite.Run(t, new(AuthTestSuite))
+}
+
+// Makes sure the database starts in a clean state before each test.
+func (s *AuthTestSuite) SetupTest() {
+	err := s.db.Ping()
+	if err != nil {
+		s.T().Logf("could not connect to database. skipping test. %s", err)
+		s.T().SkipNow()
+	}
+
+	err = s.clearDatabase()
+	if err != nil {
+		s.T().Logf("could not clear database. skipping test. %s", err)
+		s.T().SkipNow()
+	}
+}
+
+// Contains the tests for signing up to Bearchat.
+func (s *AuthTestSuite) TestSignup() {
+	// This test actually makes use of the real MySQL database. This means you need to start it
+	// for this test to work.
+	s.Run("Test Basic Signup", func() {
+		s.SetupTest()
+		// Make a fake request and response to probe the function with.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Call the function with our fake stuff.
+		signup(m, s.db)(rr, r)
+
+		// Make sure the database has an entry for our new user.
+		s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+
+		// Lastly, make sure that the mailer was called to send an email.
+		s.Assert().True(m.sendEmailCalled, "code did not call SendEmail with mailer")
+	})
+
+	//Test Multiple Signups
+	s.Run("Test Multiple Signups", func() {
+		s.SetupTest()
+		for i := 0; i < 10; i++ {
+			// Setup a JSON containing a random user.
+			cred := Credentials{Username: strconv.Itoa(i), Email: strconv.Itoa(i), Password: strconv.Itoa(i)}
+			credJson := s.credsJSON(cred)
+
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(credJson))
+			rr := httptest.NewRecorder()
+			m := newRecordMailer()
+
+			// Call the function with our fake stuff.
+			signup(m, s.db)(rr, r)
+
+			// Make sure the database has an entry for our new user.
+			s.checkExists(strconv.Itoa(i), strconv.Itoa(i))
+
+			// Check that the user was given an access_token and a refresh_token.
+			s.verifyLoginCookies(rr.Result().Cookies())
+
+			// Lastly, make sure that the mailer was called to send an email.
+			s.Assert().True(m.sendEmailCalled, "code did not call SendEmail with mailer")
+		}
+	})
+
+	s.Run("Test Duplicate Username", func() {
+		s.SetupTest()
+		// Make a fake request and response to probe the function with.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up for the first time.
+		signup(m, s.db)(rr, r)
+
+		// Make sure the database has an entry for our new user.
+		s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+
+		// Make request with duplicate username.
+		dupUserJSON := s.credsJSON(Credentials{
+			Username: "GoldenBear321",
+			Email:    "ast@gmail.com",
+			Password: "123",
+		})
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(dupUserJSON))
+		rr = httptest.NewRecorder()
+
+		//Signup with a duplicate username.
+		signup(m, s.db)(rr, r)
+
+		s.Assert().Equal(http.StatusConflict, rr.Code, "incorrect status code returned")
+	})
+
+	s.Run("Test Duplicate Email", func() {
+		s.SetupTest()
+		// Make a fake request and response to probe the function with.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up for the first time.
+		signup(m, s.db)(rr, r)
+
+		// Make sure the database has an entry for our new user.
+		s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+
+		// Make request with duplicate username.
+		dupEmailJSON := s.credsJSON(Credentials{
+			Username: "JJ",
+			Email:    "devops@berkeley.edu",
+			Password: "123",
+		})
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(dupEmailJSON))
+		rr = httptest.NewRecorder()
+
+		// Signup with a duplicate username.
+		signup(m, s.db)(rr, r)
+
+		s.Assert().Equal(http.StatusConflict, rr.Code, "incorrect status code returned")
+	})
+}
+
+func (s *AuthTestSuite) TestSignin() {
+	s.Run(("Test Basic Signin"), func() {
+		s.SetupTest()
+		//First create an user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up for the first time.
+		signup(m, s.db)(rr, r)
+
+		// Make sure the database has an entry for our new user.
+		s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+
+		//Let user sign in.
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr = httptest.NewRecorder()
+		signin(s.db)(rr, r)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+	})
+
+	// Tests that the code will error when a user who hasn't tried to signup signs in
+	s.Run(("Test Unassociated Email"), func() {
+		s.SetupTest()
+		//Let user sign in.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(s.credsJSON(Credentials{
+			Username: "GoldenBear321",
+			Email:    "cloud@berkeley.edu",
+			Password: "DaddyDenero123",
+		})))
+		rr := httptest.NewRecorder()
+		signin(s.db)(rr, r)
+
+		//Check correct status returned.
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+	})
+
+	// Makes sure that a user cannot sign in with the wrong password
+	s.Run(("Test Wrong Password"), func() {
+		s.SetupTest()
+		//First create an user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up for the first time.
+		signup(m, s.db)(rr, r)
+
+		// Make sure the database has an entry for our new user.
+		s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+		// Check that the user was given an access_token and a refresh_token.
+		s.verifyLoginCookies(rr.Result().Cookies())
+
+		// Attempt to sign in with the same username and email, but a different password.
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(s.credsJSON(Credentials{
+			Username: s.testCreds.Username,
+			Email:    s.testCreds.Email,
+			Password: "DaddyHilfinger123",
+		})))
+		rr = httptest.NewRecorder()
+		signin(s.db)(rr, r)
+
+		//Check correct status returned.
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+	})
+}
+
+func (s *AuthTestSuite) TestLogout() {
+	//First create an user and have it sign up.
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+	rr := httptest.NewRecorder()
+	m := newRecordMailer()
+
+	// Sign up for the first time.
+	signup(m, s.db)(rr, r)
+
+	// Make sure the database has an entry for our new user.
+	s.checkExists(s.testCreds.Username, s.testCreds.Email)
+
+	// Check that the user was given an access_token and a refresh_token.
+	cookies := rr.Result().Cookies()
+	s.Require().Equal(2, len(cookies), "the incorrect amount of cookies were given back")
+	s.verifyLoginCookies(cookies)
+
+	// Let user log out of their account
+	r = httptest.NewRequest(http.MethodPost, "/api/auth/logout", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+	// Add the cookies from before to this request.
+	r.AddCookie(rr.Result().Cookies()[0])
+	r.AddCookie(rr.Result().Cookies()[1])
+	rr = httptest.NewRecorder()
+	logout(rr, r)
+
+	// Check that the user's access_token and refresh_token was set to expire.
+	cookies = rr.Result().Cookies()
+	if len(cookies) == 2 {
+		s.Assert().True(cookies[0].Expires.Before(time.Now()), "%s cookie still exists and is not expired!", cookies[0].Name)
+		s.Assert().True(cookies[1].Expires.Before(time.Now()), "%s cookie still exists and is not expired!", cookies[1].Name)
+	}
+}
+
+func (s *AuthTestSuite) TestVerify() {
+	s.Run("Test Valid Token", func() {
+		s.SetupTest()
+		// First create a user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up
+		signup(m, s.db)(rr, r)
+
+		// Make sure user is not yet verified
+		var verified bool
+		err := s.db.QueryRow("SELECT verified FROM users WHERE email=?", s.testCreds.Email).Scan(&verified)
+		if s.Assert().NoError(err) {
+			s.Assert().False(verified, "user started out verified already")
+		}
+
+		// Get verification token from database
+		var token string
+		err = s.db.QueryRow("SELECT verifiedToken FROM users WHERE email=?", s.testCreds.Email).Scan(&token)
+		s.Assert().NoError(err, "an error occurred while checking the database")
+
+		// Create a fake request and response to probe the function with
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/verify", nil)
+		rr = httptest.NewRecorder()
+		q := url.Values{}
+		q.Add("token", token)
+		r.URL.RawQuery = q.Encode()
+
+		// Call the function with our fake stuff
+		verify(s.db)(rr, r)
+
+		// Make sure user is now verified
+		err = s.db.QueryRow("SELECT verified FROM users WHERE email=?", s.testCreds.Email).Scan(&verified)
+		if s.Assert().NoError(err) {
+			s.Assert().True(verified, "user was not verified")
+		}
+	})
+
+	s.Run("Test Invalid Token", func() {
+		s.SetupTest()
+		// Create a fake request and response to probe the function with
+		invalidToken := "bogusbogie123"
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/verify", nil)
+		rr := httptest.NewRecorder()
+		q := url.Values{}
+		q.Add("token", invalidToken)
+		r.URL.RawQuery = q.Encode()
+
+		// Call the function with our fake stuff
+		verify(s.db)(rr, r)
+
+		// Make sure the correct status code is returned
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+
+		// Make sure invalid token doesn't get stored in the database
+		var exists bool
+		err := s.db.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE verifiedToken=?)", invalidToken).Scan(&exists)
+		if s.Assert().NoError(err, "an error occurred while checking the database") {
+			s.Assert().False(exists, "invalid token was saved in the database")
+		}
+	})
+}
+
+func (s *AuthTestSuite) TestReset() {
+	newPassCreds := Credentials{
+		Username: "GoldenBear321",
+		Email:    "devops@berkeley.edu",
+		Password: "Oski413",
+	}
+
+	s.Run("Test sendReset Valid Email", func() {
+		s.SetupTest()
+		// First create a user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up
+		signup(m, s.db)(rr, r)
+
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr = httptest.NewRecorder()
+		m = newRecordMailer()
+
+		// Make request
+		sendReset(m, s.db)(rr, r)
+
+		// Make sure that the mailer was called to send an email.
+		s.Assert().True(m.sendEmailCalled, "code did not call SendEmail with mailer")
+	})
+
+	s.Run("Test sendReset Invalid Email", func() {
+		s.SetupTest()
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(s.credsJSON(Credentials{
+			Username: "bears",
+			Email:    "",
+			Password: "asdf",
+		})))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Make request
+		sendReset(m, s.db)(rr, r)
+
+		// Make sure the correct status code is returned
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+	})
+
+	s.Run("Test resetPassword Valid Token", func() {
+		s.SetupTest()
+		// First create a user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up
+		signup(m, s.db)(rr, r)
+
+		// Now call sendReset
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr = httptest.NewRecorder()
+		m = newRecordMailer()
+
+		sendReset(m, s.db)(rr, r)
+
+		// Make sure that the mailer was called to send an email.
+		s.Assert().True(m.sendEmailCalled, "code did not call SendEmail with mailer")
+
+		// Get reset token from database
+		var token string
+		err := s.db.QueryRow("SELECT resetToken FROM users WHERE email=?", s.testCreds.Email).Scan(&token)
+		s.Assert().NoError(err, "an error occurred while checking the database")
+
+		// Now make the request
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/resetpw", bytes.NewBuffer(s.credsJSON(newPassCreds)))
+		rr = httptest.NewRecorder()
+		q := url.Values{}
+		q.Add("token", token)
+		r.URL.RawQuery = q.Encode()
+
+		resetPassword(s.db)(rr, r)
+
+		// Make sure password was changed
+		var hashedPassword string
+		err = s.db.QueryRow("SELECT hashedPassword FROM users WHERE email=?", s.testCreds.Email).Scan(&hashedPassword)
+		s.Assert().NoError(err, "an error occurred while checking the database")
+
+		err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(newPassCreds.Password))
+		s.Assert().NoError(err, "password hash check failed")
+	})
+
+	s.Run("Test resetPassword Invalid Token", func() {
+		s.SetupTest()
+		// First create a user and have it sign up.
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr := httptest.NewRecorder()
+		m := newRecordMailer()
+
+		// Sign up
+		signup(m, s.db)(rr, r)
+
+		// Now call sendReset
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(s.credsJSON(s.testCreds)))
+		rr = httptest.NewRecorder()
+		m = newRecordMailer()
+
+		sendReset(m, s.db)(rr, r)
+
+		// Make sure that the mailer was called to send an email.
+		s.Assert().True(m.sendEmailCalled, "code did not call SendEmail with mailer")
+
+		// Now resetPassword
+		invalidToken := "hehehe"
+		r = httptest.NewRequest(http.MethodPost, "/api/auth/resetpw", bytes.NewBuffer(s.credsJSON(newPassCreds)))
+		rr = httptest.NewRecorder()
+		q := url.Values{}
+		q.Add("token", invalidToken)
+		r.URL.RawQuery = q.Encode()
+
+		resetPassword(s.db)(rr, r)
+
+		// Make sure status code is correct
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+
+		// Make sure password was not changed
+		var hashedPassword string
+		err := s.db.QueryRow("SELECT hashedPassword FROM users WHERE email=?", newPassCreds.Email).Scan(&hashedPassword)
+		s.Assert().NoError(err, "an error occurred while checking the database")
+
+		err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(s.testCreds.Password))
+		s.Assert().NoError(err)
+	})
+}
+
+// HELPER METHODS AND DEFINITIONS
+
+// Makes a Suite for all of the auth-service tests to live in
+type AuthTestSuite struct {
+	suite.Suite
+	db        *sql.DB
+	testCreds Credentials
+}
+
+// Clears the users database so the tests remain independent.
+func (s *AuthTestSuite) clearDatabase() (err error) {
+	_, err = s.db.Exec("TRUNCATE TABLE users")
+	return err
+}
+
+// Returns true iff the cookie matches the expectations for signing up and signing in.
+func (s *AuthTestSuite) verifyCookie(c *http.Cookie) bool {
+	return (c.Name == "access_token" || c.Name == "refresh_token") &&
+		c.Expires.After(time.Now()) &&
+		c.Path == "/"
+}
+
+// Verify that the cookies array contains an access_token and a refresh_token
+// with the correct attributes
+func (s *AuthTestSuite) verifyLoginCookies(cookies []*http.Cookie) {
+	if s.Assert().Equal(2, len(cookies), "the wrong amount of cookies were given back") {
+		s.Assert().True(s.verifyCookie(cookies[0]), "first cookie does not have proper attributes")
+		s.Assert().True(s.verifyCookie(cookies[1]), "second cookie does not have proper attributes")
+		s.Assert().NotEqual(cookies[0].Name, cookies[1].Name, "two of the same cookie found")
+	}
+}
+
+// Returns a byte array with a JSON containing the passed in Credentials. Useful for making basic requests.
+func (s *AuthTestSuite) credsJSON(c Credentials) []byte {
+	testCredsJSON, err := json.Marshal(c)
+
+	// Makes sure the error returned here is nil.
+	s.Require().NoErrorf(err, "failed to initialize test credentials %s", err)
+
+	return testCredsJSON
+}
+
+// Verifies that a user with the passed in email and username is in the database.
+func (s *AuthTestSuite) checkExists(username, email string) {
+	var exists bool
+	err := s.db.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", email, username).Scan(&exists)
+	if s.Assert().NoError(err, "an error occurred while checking the database") {
+		s.Assert().True(exists, "could not find the user in the database after signing up")
+	}
+}
+
+// Setup the db variable before any tests are run.
+func (s *AuthTestSuite) SetupSuite() {
+	// Connects to the MySQL Docker Container. Notice that we use localhost
+	// instead of the container's IP address since it is assumed these
+	// tests run outside of the container network.
+	db, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
+	s.Require().NoError(err, "could not connect to the database!")
+	s.db = db
+	s.testCreds = Credentials{
+		Username: "GoldenBear321",
+		Email:    "devops@berkeley.edu",
+		Password: "DaddyDenero123",
+	}
+}
 
 // Creates a Mailer that only records if SendEmail was called and does nothing else.
 type recordMailer struct {
@@ -32,782 +543,4 @@ func newRecordMailer() *recordMailer {
 func (m *recordMailer) SendEmail(recipient string, subject string, templatePath string, data map[string]interface{}) error {
 	m.sendEmailCalled = true
 	return nil
-}
-
-// Returns true iff the cookie matches the expectations for signing up and signing in.
-func verifyCookie(c *http.Cookie) bool {
-	return (c.Name == "access_token" || c.Name == "refresh_token") &&
-		c.Expires.After(time.Now()) &&
-		c.Path == "/"
-}
-
-func verifyLogoutCookie(c *http.Cookie) bool {
-	return (c.Name == "access_token" || c.Name == "refresh_token") &&
-		c.Expires.After(time.Now()) &&
-		c.Path == "/"
-}
-
-func clearDatabase(db *sql.DB) (err error) {
-	_, err = db.Exec("TRUNCATE TABLE users")
-	return err
-}
-
-func TestMain(m *testing.M) {
-	// Makes it so any log statements are discarded. Comment these two lines
-	// if you want to see the logs.
-	log.SetFlags(0)
-	log.SetOutput(io.Discard)
-
-	// Runs the tests to completion then exits.
-	os.Exit(m.Run())
-}
-
-// Contains the tests for signing up to Bearchat.
-func TestSignup(t *testing.T) {
-	testCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testCredsJson, err := json.Marshal(testCreds)
-
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
-	// Runs a basic signup test using a mock database connection (meaning no database needs to be
-	// started to run this test).
-	t.Run("Test Basic Signup (No Database)", func(t *testing.T) {
-		// Makes a new mock connection to the database. Now we don't have to start
-		// an actual database server to test the code and we don't have to clean up!
-		DB, mock, err := sqlmock.New()
-		require.NoError(t, err, "an error was not expected when opening a stub database connection")
-		defer DB.Close()
-
-		// Makes a Mailer that will record whether or not SendEmail was called.
-		m := newRecordMailer()
-
-		// Makes a fake request to signup with basic credentials. Also makes a ResponseRecorder
-		// to see what was written to the HTTP response.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-
-		// Now we make our DB expectations.
-		//
-		// The code should check if the username already exists with SELECT EXISTS.
-		mock.ExpectQuery("SELECT EXISTS").WithArgs(testCreds.Username).WillReturnRows(sqlmock.NewRows([]string{"col"}).AddRow(false))
-		// The code should also check if someone with this email has already made an account.
-		mock.ExpectQuery("SELECT EXISTS").WithArgs(testCreds.Email).WillReturnRows(sqlmock.NewRows([]string{"col"}).AddRow(false))
-		// The code should try to insert a user into the database if all went well. They can do this with an INSERT INTO or REPLACE INTO
-		mock.ExpectExec("(INSERT INTO|REPLACE INTO)").WithArgs(testCreds.Username, testCreds.Email, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
-
-		// Invoke the route with everything we've setup.
-		signup(m, DB)(rr, r)
-
-		// First make sure that the request was given the proper status code.
-		assert.Equal(t, http.StatusCreated, rr.Result().StatusCode, "incorrect status code returned")
-
-		// Make sure everything is good with regards to SQL queries.
-		err = mock.ExpectationsWereMet()
-		assert.NoError(t, err, "make sure you're checking if there are conflicts and inserting the user properly")
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		// Lastly, make sure that the mailer was called to send an email.
-		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-	})
-
-	// This test actually makes use of the real MySQL database. This means you need to start it
-	// for this test to work.
-	t.Run("Test Basic Signup (Use Database)", func(t *testing.T) {
-		// Make a fake request and response to probe the function with.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Call the function with our fake stuff.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		// Lastly, make sure that the mailer was called to send an email.
-		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-	})
-
-	//Test Multiple Signups
-	t.Run("Test Multiple Signups", func(t *testing.T) {
-		for i := 0; i < 10; i++ {
-			cred := Credentials{Username: strconv.Itoa(i), Email: strconv.Itoa(i), Password: strconv.Itoa(i)}
-
-			credJson, err := json.Marshal(cred)
-
-			// Makes sure the error returned here is nil.
-			require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-			r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(credJson))
-			rr := httptest.NewRecorder()
-			m := newRecordMailer()
-
-			// Make sure we're connected to the SQL database.
-			err = MySQLDB.Ping()
-			require.NoError(t, err, "could not connect to DB")
-
-			// Make sure we're able to clear the database for this test.
-			err = clearDatabase(MySQLDB)
-			require.NoError(t, err, "could not clear database")
-
-			// Call the function with our fake stuff.
-			signup(m, MySQLDB)(rr, r)
-
-			// Make sure the database has an entry for our new user.
-			var exists bool
-			err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", cred.Email, cred.Username).Scan(&exists)
-			if assert.NoError(t, err, "an error occurred while checking the database") {
-				assert.True(t, exists, "could not find the user in the database after signing up")
-			}
-
-			// Check that the user was given an access_token and a refresh_token.
-			cookies := rr.Result().Cookies()
-			if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-				assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-				assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-				assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-			}
-
-			// Lastly, make sure that the mailer was called to send an email.
-			assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-		}
-	})
-
-	//Test Duplicates
-
-	testDupUsername := Credentials{
-		Username: "GoldenBear321",
-		Email:    "ast@gmail.com",
-		Password: "123",
-	}
-
-	testDupEmail := Credentials{
-		Username: "JJ",
-		Email:    "devops@berkeley.edu",
-		Password: "123",
-	}
-
-	testDupUserJson, err := json.Marshal(testDupUsername)
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	testDupEmailJson, err := json.Marshal(testDupEmail)
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	t.Run("Test Duplicate Username", func(t *testing.T) {
-		// Make a fake request and response to probe the function with.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		//Make request with duplicate username.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testDupUserJson))
-		rr = httptest.NewRecorder()
-
-		//Signup with a duplicate username.
-		signup(m, MySQLDB)(rr, r)
-
-		assert.Equal(t, http.StatusConflict, rr.Code, "incorrect status code returned")
-	})
-
-	t.Run("Test Duplicate Email", func(t *testing.T) {
-		// Make a fake request and response to probe the function with.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		// Make request with duplicate username.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testDupEmailJson))
-		rr = httptest.NewRecorder()
-
-		// Signup with a duplicate username.
-		signup(m, MySQLDB)(rr, r)
-
-		assert.Equal(t, http.StatusConflict, rr.Code, "incorrect status code returned")
-	})
-}
-
-func TestSignin(t *testing.T) {
-	testCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testCredsJson, err := json.Marshal(testCreds)
-
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
-	t.Run(("Test Basic Signin"), func(t *testing.T) {
-		//First create an user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		//Let user sign in.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testCredsJson))
-		rr = httptest.NewRecorder()
-		signin(MySQLDB)(rr, r)
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies = rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-	})
-
-	testEmailCred := Credentials{
-		Username: "GoldenBear321",
-		Email:    "cloud@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testEmailJson, err := json.Marshal(testEmailCred)
-
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	t.Run(("Test Unassociated Email"), func(t *testing.T) {
-		//First create an user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		//Let user sign in.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testEmailJson))
-		rr = httptest.NewRecorder()
-		signin(MySQLDB)(rr, r)
-
-		//Check correct status returned.
-		assert.Equal(t, http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
-	})
-
-	testPassCred := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyHilfinger123",
-	}
-	testPassJson, err := json.Marshal(testPassCred)
-
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	t.Run(("Test Unassociated Email"), func(t *testing.T) {
-		//First create an user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		//Let user sign in.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testPassJson))
-		rr = httptest.NewRecorder()
-		signin(MySQLDB)(rr, r)
-
-		//Check correct status returned.
-		assert.Equal(t, http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
-	})
-}
-
-func TestLogout(t *testing.T) {
-	testCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testCredsJson, err := json.Marshal(testCreds)
-
-	// Makes sure the error returned here is nil.
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
-	t.Run(("Test logout"), func(t *testing.T) {
-		//First create an user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up for the first time.
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure the database has an entry for our new user.
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE email=? AND username=?)", testCreds.Email, testCreds.Username).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.True(t, exists, "could not find the user in the database after signing up")
-		}
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies := rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-
-		//Let user sign in.
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/signin", bytes.NewBuffer(testCredsJson))
-		rr = httptest.NewRecorder()
-		signin(MySQLDB)(rr, r)
-
-		// Check that the user was given an access_token and a refresh_token.
-		cookies = rr.Result().Cookies()
-		if assert.Equal(t, 2, len(cookies), "the wrong amount of cookies were given back") {
-			assert.True(t, verifyLogoutCookie(cookies[0]), "first cookie does not have proper attributes")
-			assert.True(t, verifyLogoutCookie(cookies[1]), "second cookie does not have proper attributes")
-			assert.NotEqual(t, cookies[0].Name, cookies[1].Name, "two of the same cookie found")
-		}
-	})
-}
-
-func TestVerify(t *testing.T) {
-	invalidToken := "bogusbogie123"
-
-	testCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testCredsJson, err := json.Marshal(testCreds)
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
-	t.Run("Test Valid Token", func(t *testing.T) {
-		// First create a user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up
-		signup(m, MySQLDB)(rr, r)
-
-		// Make sure user is not yet verified
-		var verified bool
-		err = MySQLDB.QueryRow("SELECT verified FROM users WHERE email=?", testCreds.Email).Scan(&verified)
-		assert.False(t, verified, "user started out verified already")
-
-		// Get verification token from database
-		var token string
-		err = MySQLDB.QueryRow("SELECT verifiedToken FROM users WHERE email=?", testCreds.Email).Scan(&token)
-		assert.NoError(t, err, "an error occurred while checking the database")
-
-		// Create a fake request and response to probe the function with
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/verify", nil)
-		rr = httptest.NewRecorder()
-		q := url.Values{}
-		q.Add("token", token)
-		r.URL.RawQuery = q.Encode()
-
-		// Call the function with our fake stuff
-		verify(MySQLDB)(rr, r)
-
-		// Make sure user is now verified
-		err = MySQLDB.QueryRow("SELECT verified FROM users WHERE email=?", testCreds.Email).Scan(&verified)
-		assert.True(t, verified, "user was not verified")
-	})
-
-	t.Run("Test Invalid Token", func(t *testing.T) {
-		// Create a fake request and response to probe the function with
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/verify", nil)
-		rr := httptest.NewRecorder()
-		q := url.Values{}
-		q.Add("token", invalidToken)
-		r.URL.RawQuery = q.Encode()
-
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Call the function with our fake stuff
-		verify(MySQLDB)(rr, r)
-
-		// Make sure the correct status code is returned
-		assert.Equal(t, http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
-
-		// Make sure invalid token doesn't get stored in the database
-		var exists bool
-		err = MySQLDB.QueryRow("SELECT EXISTS(SELECT * FROM users WHERE verifiedToken=?)", invalidToken).Scan(&exists)
-		if assert.NoError(t, err, "an error occurred while checking the database") {
-			assert.False(t, exists, "invalid token was saved in the database")
-		}
-	})
-}
-
-func TestReset(t *testing.T) {
-	invalidToken := "hehehe"
-
-	testCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "DaddyDenero123",
-	}
-	testCredsJson, err := json.Marshal(testCreds)
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	newPasswordCreds := Credentials{
-		Username: "GoldenBear321",
-		Email:    "devops@berkeley.edu",
-		Password: "Oski456",
-	}
-	newPasswordCredsJson, err := json.Marshal(newPasswordCreds)
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	invalidTestCreds := Credentials{
-		Username: "bears",
-		Email:    "",
-		Password: "asdf",
-	}
-	invalidTestCredsJson, err := json.Marshal(invalidTestCreds)
-	require.NoErrorf(t, err, "failed to initialize test credentials %s", err)
-
-	// Connects to the MySQL Docker Container. Notice that we use localhost
-	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
-	MySQLDB, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/auth")
-
-	require.NoErrorf(t, err, "failed to initialize database connection")
-
-	t.Run("Test sendReset Valid Email", func(t *testing.T) {
-		// First create a user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up
-		signup(m, MySQLDB)(rr, r)
-
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(testCredsJson))
-		rr = httptest.NewRecorder()
-		m = newRecordMailer()
-
-		// Make request
-		sendReset(m, MySQLDB)(rr, r)
-
-		// Make sure that the mailer was called to send an email.
-		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-	})
-	t.Run("Test sendReset Invalid Email", func(t *testing.T) {
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(invalidTestCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-
-		// Make request
-		sendReset(m, MySQLDB)(rr, r)
-
-		// Make sure the correct status code is returned
-		assert.Equal(t, http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
-	})
-	t.Run("Test resetPassword Valid Token", func(t *testing.T) {
-		// First create a user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up
-		signup(m, MySQLDB)(rr, r)
-
-		// Now call sendReset
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(testCredsJson))
-		rr = httptest.NewRecorder()
-		m = newRecordMailer()
-
-		sendReset(m, MySQLDB)(rr, r)
-
-		// Make sure that the mailer was called to send an email.
-		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-
-		// Get reset token from database
-		var token string
-		err = MySQLDB.QueryRow("SELECT resetToken FROM users WHERE email=?", newPasswordCreds.Email).Scan(&token)
-		assert.NoError(t, err, "an error occurred while checking the database")
-
-		// Now make the request
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/resetpw", bytes.NewBuffer(newPasswordCredsJson))
-		rr = httptest.NewRecorder()
-		q := url.Values{}
-		q.Add("token", token)
-		r.URL.RawQuery = q.Encode()
-
-		resetPassword(MySQLDB)(rr, r)
-
-		// Make sure password was changed
-		var hashedPassword string
-		err = MySQLDB.QueryRow("SELECT hashedPassword FROM users WHERE email=?", newPasswordCreds.Email).Scan(&hashedPassword)
-		assert.NoError(t, err, "an error occurred while checking the database")
-
-		err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(newPasswordCreds.Password))
-		assert.NoError(t, err)
-	})
-	t.Run("Test resetPassword Invalid Token", func(t *testing.T) {
-		// First create a user and have it sign up.
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/signup", bytes.NewBuffer(testCredsJson))
-		rr := httptest.NewRecorder()
-		m := newRecordMailer()
-		// Make sure we're connected to the SQL database.
-		err = MySQLDB.Ping()
-		require.NoError(t, err, "could not connect to DB")
-
-		// Make sure we're able to clear the database for this test.
-		err = clearDatabase(MySQLDB)
-		require.NoError(t, err, "could not clear database")
-
-		// Sign up
-		signup(m, MySQLDB)(rr, r)
-
-		// Now call sendReset
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/sendreset", bytes.NewBuffer(testCredsJson))
-		rr = httptest.NewRecorder()
-		m = newRecordMailer()
-
-		sendReset(m, MySQLDB)(rr, r)
-
-		// Make sure that the mailer was called to send an email.
-		assert.True(t, m.sendEmailCalled, "code did not call SendEmail with mailer")
-
-		// Now resetPassword
-		r = httptest.NewRequest(http.MethodPost, "/api/auth/resetpw", bytes.NewBuffer(newPasswordCredsJson))
-		rr = httptest.NewRecorder()
-		q := url.Values{}
-		q.Add("token", invalidToken)
-		r.URL.RawQuery = q.Encode()
-
-		resetPassword(MySQLDB)(rr, r)
-
-		// Make sure status code is correct
-		assert.Equal(t, http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
-
-		// Make sure password was not changed
-		var hashedPassword string
-		err = MySQLDB.QueryRow("SELECT hashedPassword FROM users WHERE email=?", newPasswordCreds.Email).Scan(&hashedPassword)
-		assert.NoError(t, err, "an error occurred while checking the database")
-
-		err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(testCreds.Password))
-		assert.NoError(t, err)
-	})
 }

@@ -3,7 +3,6 @@ module github.com/BearCloud/sp21-bearchat/auth-service
 go 1.16
 
 require (
-	github.com/DATA-DOG/go-sqlmock v1.5.0
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/google/uuid v1.2.0

@@ -9,11 +9,11 @@ import (
 )
 
 func main() {
-	DB := api.InitDB()
-	defer DB.Close()
+	db := api.InitDB()
+	defer db.Close()
 
 	// Ping the database to make sure it's up
-	if err := DB.Ping(); err != nil {
+	if err := db.Ping(); err != nil {
 		panic(err.Error())
 	}
 
@@ -22,7 +22,7 @@ func main() {
 	router.Use(CORS)
 	router.Methods(http.MethodOptions)
 
-	api.RegisterRoutes(router)
+	api.RegisterRoutes(router, db)
 
 	log.Print("starting profiles service")
 	http.ListenAndServe(":80", router)

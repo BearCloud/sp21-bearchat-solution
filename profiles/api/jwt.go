@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/dgrijalva/jwt-go"
 )
@@ -17,7 +18,7 @@ type AuthClaims struct {
 	jwt.StandardClaims
 }
 
-func ValidateToken(tokenString string) (jwt.MapClaims, error) {
+func validateToken(tokenString string) (jwt.MapClaims, error) {
 
 	token, _ := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Don't forget to validate the alg is what you expect:
@@ -32,4 +33,25 @@ func ValidateToken(tokenString string) (jwt.MapClaims, error) {
 	} else {
 		return nil, errors.New("could not parse claims")
 	}
+}
+
+// Given an HTTP request and ResponseWriter, takes the access_token cookie and makes sure it is valid. If it is valid
+// then this function will return the uuid and no error. Otherwise, it writes an error to the Response
+// and returns the error.
+var getUUID = func(w http.ResponseWriter, r *http.Request) (uuid string, err error) {
+	// The weird syntax above for declaring the function above is so we can
+	// reassign getUUID to some other function when we test. Quite a neat hack :^).
+	cookie, err := r.Cookie("access_token")
+	if err != nil {
+		http.Error(w, "error obtaining cookie: "+err.Error(), http.StatusBadRequest)
+		return "", err
+	}
+	// Validate the cookie
+	claims, err := validateToken(cookie.Value)
+	if err != nil {
+		http.Error(w, "error validating token: "+err.Error(), http.StatusUnauthorized)
+		return "", err
+	}
+
+	return claims["UserID"].(string), nil
 }

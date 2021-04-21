@@ -37,6 +37,25 @@ func TestUpdateProfile(t *testing.T) {
 	suite.Run(t, new(UpdateProfileTestSuite))
 }
 
+// Tests that getProfile() succeeds in retrieving a Profile that exists.
+func (s *GetProfileTestSuite) TestBasicGet() {
+	// Insert a fake profile into the users database.
+	_, err := s.db.Exec("INSERT INTO users VALUES (?, ?, ?, ?)", s.testProfile.Firstname, s.testProfile.Lastname, s.testProfile.Email, s.testProfile.UUID)
+	s.Require().NoError(err, "could not insert user into database")
+
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/profile/"+s.testProfile.UUID, nil)
+	r = mux.SetURLVars(r, map[string]string{"uuid": s.testProfile.UUID})
+
+	getProfile(s.db)(rr, r)
+
+	if s.Assert().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned") {
+		var p Profile
+		json.NewDecoder(rr.Result().Body).Decode(&p)
+		s.Assert().Equal(s.testProfile, p, "incorrect profile returned")
+	}
+
+}
+
 // Tests that getProfile() returns an http.StatusBadRequest in the event we ask
 // for a profile that doesn't exist.
 func (s *GetProfileTestSuite) TestNoExistingUUID() {

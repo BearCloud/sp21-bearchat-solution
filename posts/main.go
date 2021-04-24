@@ -21,7 +21,7 @@ func main() {
 	router.Use(CORS)
 	router.Methods(http.MethodOptions)
 
-	api.RegisterRoutes(router)
+	api.RegisterRoutes(router, DB)
 
 	log.Println("listening...")
 	log.Fatal(http.ListenAndServe(":80", router))

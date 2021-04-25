@@ -51,7 +51,7 @@ func getPosts(db *sql.DB) http.HandlerFunc {
 		// -Sort them chronologically (the database has a "postTime" field), hint: ORDER BY
 		// -Make sure to always get up to 25, and start with an offset of {startIndex} (look at the previous SQL homework for hints)
 		// -As indicated by the "posts" variable, this query returns multiple rows
-		posts, err := DB.Query("SELECT * FROM posts WHERE authorID=? ORDER BY postTime LIMIT 25", userID, startIndex)
+		posts, err := db.Query("SELECT * FROM posts WHERE authorID=? ORDER BY postTime ASC LIMIT 25 OFFSET ?", userID, startIndex)
 
 		// Check for errors from the query
 		if err != nil {
@@ -145,7 +145,7 @@ func createPost(db *sql.DB) http.HandlerFunc {
 
 		// Insert the post into the database
 		// Look at /db-server/initdb.sql for a better understanding of what you need to insert
-		result, err := DB.Exec("INSERT INTO posts VALUES (?, ?, ?, ?)", post.PostBody, postID, userID, currPST)
+		result, err := db.Exec("INSERT INTO posts VALUES (?, ?, ?, ?)", post.PostBody, postID, userID, currPST)
 
 		// Check errors with executing the query
 		if err != nil {
@@ -180,7 +180,7 @@ func deletePost(db *sql.DB) http.HandlerFunc {
 
 		var exists bool
 		// Check if post exists
-		err = DB.QueryRow("SELECT EXISTS (SELECT * FROM posts WHERE postID=?)", postID).Scan(&exists)
+		err = db.QueryRow("SELECT EXISTS (SELECT * FROM posts WHERE postID=?)", postID).Scan(&exists)
 
 		// Check for errors in executing the query
 		if err != nil {
@@ -197,7 +197,7 @@ func deletePost(db *sql.DB) http.HandlerFunc {
 
 		// Get the authorID of the post with the specified postID
 		var authorID string
-		err = DB.QueryRow("SELECT authorID FROM posts WHERE postID=?", postID).Scan(&authorID)
+		err = db.QueryRow("SELECT authorID FROM posts WHERE postID=?", postID).Scan(&authorID)
 
 		// Check for errors in executing the query
 		if err != nil {
@@ -214,7 +214,7 @@ func deletePost(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Delete the post since by now we're authorized to do so
-		_, err = DB.Exec("DELETE FROM posts WHERE postID=?", postID)
+		_, err = db.Exec("DELETE FROM posts WHERE postID=?", postID)
 
 		// Check for errors in executing the query
 		if err != nil {
@@ -255,7 +255,7 @@ func getFeed(db *sql.DB) http.HandlerFunc {
 		// Sort chronologically
 		// Always limit to 25 queries
 		// Always start at an offset of startIndex
-		posts, err := DB.Query("SELECT * FROM posts WHERE authorID<>? ORDER BY postTime LIMIT 25", userID, startIndex)
+		posts, err := db.Query("SELECT * FROM posts WHERE authorID<>? ORDER BY postTime LIMIT 25", userID, startIndex)
 
 		// Check for errors in executing the query
 		if err != nil {

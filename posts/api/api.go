@@ -13,8 +13,9 @@ import (
 )
 
 func RegisterRoutes(router *mux.Router, db *sql.DB) {
-	router.HandleFunc("/api/posts/{startIndex}", getFeed(db)).Methods(http.MethodGet)
-	router.HandleFunc("/api/posts/{uuid}/{startIndex}", getPosts(db)).Methods(http.MethodGet)
+	// Spicy regex on the path names to help with integers :^).
+	router.HandleFunc("/api/posts/{startIndex:[0-9]+}", getFeed(db)).Methods(http.MethodGet)
+	router.HandleFunc("/api/posts/{uuid}/{startIndex:[0-9]+}", getPosts(db)).Methods(http.MethodGet)
 	router.HandleFunc("/api/posts/create", createPost(db)).Methods(http.MethodPost)
 	router.HandleFunc("/api/posts/delete/{postID}", deletePost(db)).Methods(http.MethodDelete)
 }

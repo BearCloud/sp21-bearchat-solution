@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +39,7 @@ func TestGetPosts(t *testing.T) {
 // more than 25 posts in it.
 func (s *GetPostsSuite) TestBasicGetPosts() {
 	// Insert 30 fake posts into the database.
-	posts := s.insertFakePosts(30, "0", true)
+	expectedPosts := s.insertFakePosts(30, "0", true)
 
 	// Make a request to the posts endpoint for UUID 0 and get all posts starting from 0.
 	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
@@ -54,27 +54,81 @@ func (s *GetPostsSuite) TestBasicGetPosts() {
 
 	// Make sure we got exactly 25 posts back.
 	var returnedPosts []Post
-	json.NewDecoder(rr.Result().Body).Decode(&returnedPosts)
-	s.Require().Equal(25, len(returnedPosts), "incorrect number of posts returned")
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
 
-	// Now check that the returned posts are in the correct order. Note because
-	// of the issue with times mentioned below, we do the check manually.
-	for i, post := range returnedPosts {
-		// Normally you would use just time.Equal() here to compare them, but the way
-		// we've set up our database makes it so it doesn't store times with
-		// nanosecond precision (unlike Go's time.Time). Hence, the Equal checks will
-		// fail. Rounding up to the nearest second solves the issue.
-		s.Assert().True(posts[i].PostTime.Round(time.Second).Equal(post.PostTime.Round(time.Second)), "wrong time returned")
+	// Verify the posts we got back match expectations.
+	s.verifyPosts(expectedPosts[:25], returnedPosts)
+}
 
-		// Check that the bodies are the same.
-		s.Assert().Equal(posts[i].PostBody, post.PostBody, "wrong body returned")
+// Makes sure that the code gives valid error messages when a user
+// is not authorized to see posts.
+func (s *GetPostsSuite) TestUnauthorizedGetPosts() {
+	s.Run("No Cookie", func() {
+		// Generate a request without setting the cookie.
+		rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
+		r = mux.SetURLVars(r, map[string]string{"uuid": "0", "startIndex": "0"})
 
-		// Check that the authorID is correct.
-		s.Assert().Equal(posts[i].AuthorID, post.AuthorID, "wrong author ID returned")
+		getPosts(s.db)(rr, r)
 
-		// Check that the postID matches.
-		s.Assert().Equal(posts[i].PostID, post.PostID, "wrong postID")
-	}
+		// When the cookie is missing, the server should return a Status Bad Request.
+		s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code")
+	})
+
+	s.Run("Bad Cookie", func() {
+		// Generate a request with an expired cookie.
+		rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
+		r = mux.SetURLVars(r, map[string]string{"uuid": "0", "startIndex": "0"})
+		cookie := s.generateFakeAccessToken("0")
+		// The end of a JWT is the signature. This will almost certainly make the
+		// signature invalid.
+		cookie.Value = cookie.Value[:len(cookie.Value)-4] + "000"
+		r.AddCookie(cookie)
+
+		getPosts(s.db)(rr, r)
+
+		// When the cookie is invalid, we should get a Status Unauthorized.
+		s.Assert().Equal(http.StatusUnauthorized, rr.Result().StatusCode, "incorrect status code")
+	})
+
+	s.Run("Wrong Cookie", func() {
+		// Generate a request with the cookie for another user.
+		rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
+		r = mux.SetURLVars(r, map[string]string{"uuid": "0", "startIndex": "0"})
+		r.AddCookie(s.generateFakeAccessToken("1"))
+
+		getPosts(s.db)(rr, r)
+
+		// When the cookie is for the wrong person, we should get a Status Unauthorized.
+		s.Assert().Equal(http.StatusUnauthorized, rr.Result().StatusCode, "incorrect status code")
+	})
+}
+
+// Tests that getPosts() only returns posts from the specified author
+// and no one else.
+func (s *GetPostsSuite) TestRightGetPosts() {
+	// Fill the database with some posts.
+	s.insertFakePosts(50, "0", true)
+	s.insertFakePosts(50, "1", true)
+	expectedPosts := s.insertFakePosts(1, "10", true)
+	s.insertFakePosts(50, "11", true)
+
+	// Make a request to the posts endpoint for UUID 10 and get all posts starting from 0.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/10/0", nil)
+	r.AddCookie(s.generateFakeAccessToken("10"))
+	r = mux.SetURLVars(r, map[string]string{"uuid": "10", "startIndex": "0"})
+
+	// Call the function.
+	getPosts(s.db)(rr, r)
+
+	// Check the status code.
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we got exactly 1 post back.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+
+	// Verify the posts we got back match expectations.
+	s.verifyPosts(expectedPosts, returnedPosts)
 }
 
 // HELPER METHODS AND DEFINITIONS
@@ -164,7 +218,7 @@ func (s *PostsSuite) SetupTest() {
 	}
 
 	// Seeds the random post generator so we can get consistent tests.
-	gofakeit.Seed(0)
+	gofakeit.Seed(1)
 }
 
 // Given an HTTP method, API endpoint, and io.Reader, returns a ResponseRecorder and a fake Request
@@ -183,6 +237,15 @@ func (s *PostsSuite) generateRequestAndResponse(method, endpoint string, body io
 // Also takes in an authorID for all of the posts.
 func (s *PostsSuite) insertFakePosts(num int, authorID string, ascending bool) []Post {
 	returnSlice := make([]Post, num)
+	if num <= 0 {
+		return returnSlice
+	}
+	// Spicy query line. Just duplicates (?, ?, ?, ?) a bunch of times after the
+	// word VALUES so we can insert everything at once. See below why we do this.
+	query := "INSERT INTO posts VALUES " + strings.Repeat("(?, ?, ?, ?), ", num)
+	// Trims the last comma and space off the end.
+	query = query[:len(query)-2]
+	var queryParams []interface{}
 	for i := 0; i < num; i += 1 {
 		// Generate a random body for the post.
 		returnSlice[i] = s.randomPost()
@@ -202,13 +265,20 @@ func (s *PostsSuite) insertFakePosts(num int, authorID string, ascending bool) [
 		returnSlice[i].AuthorID = authorID
 
 		// Also pick some non-conflicting IDs for the postIDs.
-		returnSlice[i].PostID = strconv.Itoa(i)
+		returnSlice[i].PostID = gofakeit.UUID()
 
-		// Insert it into the database.
-		p := returnSlice[i]
-		_, err := s.db.Exec("INSERT INTO posts VALUES (?, ?, ?, ?)", p.PostBody, p.PostID, p.AuthorID, p.PostTime)
-		s.Require().NoError(err, "there was an errror inserting a fake post")
+		// Now save the values from this Post so we can put them into a query.
+		queryParams = append(queryParams, returnSlice[i].PostBody, returnSlice[i].PostID, returnSlice[i].AuthorID, returnSlice[i].PostTime)
 	}
+
+	// Now insert into the database. Notice that we do this after creating all the
+	// Posts instead of during the loop. This is an optimization since, if we did
+	// it during the loop, we would make NUM queries to the database and that takes longer
+	// than making one single query. This is often called an n+1 queries problem.
+	_, err := s.db.Exec(query, queryParams...)
+	s.Require().NoError(err, "failed to insert into the database")
+
+	// Return the posts.
 	return returnSlice
 }
 
@@ -234,5 +304,31 @@ func (s *PostsSuite) generateFakeAccessToken(uuid string) *http.Cookie {
 		Name:    "access_token",
 		Value:   tokenString,
 		Expires: time.Now().AddDate(0, 0, 1),
+	}
+}
+
+// Verifies that the expected and actual slices of posts meet expectations. Fails
+// the current test if not.
+func (s *PostsSuite) verifyPosts(expected, actual []Post) {
+	// Make sure we got the right postst back
+	s.Require().Equal(len(expected), len(actual), "incorrect number of posts returned")
+
+	// Now check that the returned posts are in the correct order. Note because
+	// of the issue with times mentioned below, we do the check manually.
+	for i, returnedPost := range actual {
+		// Normally you would use just time.Equal() here to compare them, but the way
+		// we've set up our database makes it so it doesn't store times with
+		// nanosecond precision (unlike Go's time.Time). Hence, the Equal checks will
+		// fail. Rounding up to the nearest second solves the issue.
+		s.Assert().True(expected[i].PostTime.Round(time.Second).Equal(returnedPost.PostTime.Round(time.Second)), "wrong time returned")
+
+		// Check that the bodies are the same.
+		s.Assert().Equal(expected[i].PostBody, returnedPost.PostBody, "wrong body returned")
+
+		// Check that the authorID is correct.
+		s.Assert().Equal(expected[i].AuthorID, returnedPost.AuthorID, "wrong author ID returned")
+
+		// Check that the postID matches.
+		s.Assert().Equal(expected[i].PostID, returnedPost.PostID, "wrong postID")
 	}
 }

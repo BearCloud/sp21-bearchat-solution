@@ -61,22 +61,16 @@ func getPosts(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var (
-			content  string
-			postID   string
-			userid   string
-			postTime time.Time
-		)
-		numPosts := 0
-		// Create "postsArray", which is a slice (array) of Posts. Make sure it has size 25
+		// Create "postsArray", which is a slice (array) of Posts. Make sure it has capacity 25
 		// Hint: https://tour.golang.org/moretypes/13
-		postsArray := make([]Post, 25)
+		postsArray := make([]Post, 0, 25)
 
-		for i := 0; i < 25 && posts.Next(); i++ {
+		for posts.Next() {
 			// Every time we call posts.Next() we get access to the next row returned from our query
 			// Question: How many columns did we return
 			// Reminder: Scan() scans the rows in order of their columns. See the variables defined up above for your convenience
-			err = posts.Scan(&content, &postID, &userid, &postTime)
+			p := Post{}
+			err = posts.Scan(&p.PostBody, &p.PostID, &p.AuthorID, &p.PostTime)
 
 			// Check for errors in scanning
 			if err != nil {
@@ -85,11 +79,8 @@ func getPosts(db *sql.DB) http.HandlerFunc {
 				return
 			}
 
-			// Set the i-th index of postsArray to a new Post with values directly from the variables you just scanned into
-			// Check post.go for the structure of a Post
-			// Hint: https://gobyexample.com/structs
-			postsArray[i] = Post{content, postID, userid, postTime}
-			numPosts++
+			// Append the newly scanned element to the array.
+			postsArray = append(postsArray, p)
 		}
 
 		err = posts.Close()
@@ -110,7 +101,7 @@ func getPosts(db *sql.DB) http.HandlerFunc {
 		// We will always have *up to* 25 posts, but we can have less
 		// However, we already allocated 25 spots in our postsArray
 		// Return the subarray that contains all of our values (which may be a subsection of our array or the entire array)
-		json.NewEncoder(w).Encode(postsArray[0:numPosts])
+		json.NewEncoder(w).Encode(postsArray)
 	}
 }
 
@@ -220,11 +211,7 @@ func getFeed(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// get the start index from the url paramaters
 		// based on the previous functions, you should be familiar with how to do so
-		start, ok := mux.Vars(r)["startIndex"]
-		if !ok {
-			http.Error(w, "start index not detected in URL", http.StatusBadRequest)
-			return
-		}
+		start := mux.Vars(r)["startIndex"]
 
 		// Convert startIndex to int
 		startIndex, err := strconv.Atoi(start)
@@ -247,27 +234,21 @@ func getFeed(db *sql.DB) http.HandlerFunc {
 		// Sort chronologically
 		// Always limit to 25 queries
 		// Always start at an offset of startIndex
-		posts, err := db.Query("SELECT * FROM posts WHERE authorID<>? ORDER BY postTime LIMIT 25", userID, startIndex)
+		posts, err := db.Query("SELECT * FROM posts WHERE authorID<>? ORDER BY postTime ASC LIMIT 25 OFFSET ?", userID, startIndex)
 
 		// Check for errors in executing the query
 		if err != nil {
-			http.Error(w, "there was an error retreiving your feed", http.StatusInternalServerError)
+			http.Error(w, "there was an error retrieving your feed", http.StatusInternalServerError)
 			log.Print(err.Error())
 			return
 		}
 
-		var (
-			content  string
-			postID   string
-			userid   string
-			postTime time.Time
-		)
-
 		// Put all the posts into an array of Max Size 25 and return all the filled spots
 		// Almost exactly like getPosts()
-		postsArray, numPosts := make([]Post, 25), 0
-		for i := 0; i < 25 && posts.Next(); i++ {
-			err = posts.Scan(&content, &postID, &userid, &postTime)
+		postsArray := make([]Post, 0, 25)
+		for posts.Next() {
+			p := Post{}
+			err = posts.Scan(&p.PostBody, &p.PostID, &p.AuthorID, &p.PostTime)
 
 			// Check for errors in scanning
 			if err != nil {
@@ -276,20 +257,23 @@ func getFeed(db *sql.DB) http.HandlerFunc {
 				return
 			}
 
-			// Set the i-th index of postsArray to a new Post with values directly from the variables you just scanned into
-			// Check post.go for the structure of a Post
-			// Hint: https://gobyexample.com/structs
-			postsArray[i] = Post{content, postID, userid, postTime}
-			numPosts++
+			postsArray = append(postsArray, p)
 		}
 
-		posts.Close()
+		err = posts.Close()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Print(err.Error())
+			return
+		}
+
 		err = posts.Err()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			log.Print(err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(postsArray[0:numPosts])
+
+		json.NewEncoder(w).Encode(postsArray)
 	}
 }

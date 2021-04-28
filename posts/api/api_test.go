@@ -321,6 +321,101 @@ func (s *DeletePostSuite) TestUnauthorized() {
 	})
 }
 
+// Makes sure that getFeed() works when there are 25 posts from other users.
+func (s *GetFeedSuite) TestBasic() {
+	// Insert 25 posts from user 1 into the database.
+	expectedPosts := s.insertFakePosts(25, "1", true)
+
+	// Make a request to the posts endpoint to get all posts starting from 0.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"startIndex": "0"})
+
+	// Call the function.
+	getFeed(s.db)(rr, r)
+
+	// Check the status code.
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we got exactly 25 posts back.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+
+	// Verify the posts we got back match expectations.
+	s.verifyPosts(expectedPosts, returnedPosts)
+}
+
+// Makes sure that getFeed() works when there are less than 25 posts from other users.
+func (s *GetFeedSuite) TestLessThan25Posts() {
+	// Insert 10 posts from user 1 into the database.
+	expectedPosts := s.insertFakePosts(10, "1", true)
+
+	// Make a request to the posts endpoint to get all posts starting from 0.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"startIndex": "0"})
+
+	getFeed(s.db)(rr, r)
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we got exactly 10 posts back.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+	s.verifyPosts(expectedPosts, returnedPosts)
+}
+
+// Tests that getFeed() returns posts only from other users
+// and not the author.
+func (s *GetFeedSuite) TestMixed() {
+	// Insert 100 posts from AuthorID 0 and 1 from AuthorID 1.
+	s.insertFakePosts(100, "0", true)
+	expectedPosts := s.insertFakePosts(1, "1", true)
+
+	// Make a request with id 0.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"startIndex": "0"})
+
+	getFeed(s.db)(rr, r)
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we only got the post from user id 1 back.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+	s.verifyPosts(expectedPosts, returnedPosts)
+}
+
+// Tests that only authorized people can access the feed.
+func (s *GetFeedSuite) TestUnauthorized() {
+	// Generate a request without setting the cookie.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0", nil)
+	r = mux.SetURLVars(r, map[string]string{"startIndex": "0"})
+
+	getFeed(s.db)(rr, r)
+
+	// When the cookie is missing, the server should return a Status Bad Request.
+	s.Assert().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code")
+}
+
+// Test that getFeed() works with an offset.
+func (s *GetFeedSuite) TestOffset() {
+	// Insert 100 posts from user 1 into the database.
+	expectedPosts := s.insertFakePosts(100, "1", true)
+
+	// Make a request to the posts endpoint to get all posts starting from 50.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/50", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"startIndex": "50"})
+
+	getFeed(s.db)(rr, r)
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we got exactly 25 posts back.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+	s.verifyPosts(expectedPosts[50:75], returnedPosts)
+}
+
 // HELPER METHODS AND DEFINITIONS
 
 // Defines the suite of tests for the entire Posts service.

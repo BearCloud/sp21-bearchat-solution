@@ -135,18 +135,9 @@ func createPost(db *sql.DB) http.HandlerFunc {
 		// Hint: https://godoc.org/github.com/google/uuid#New
 		postID := uuid.New()
 
-		// Load our location in PST
-		pst, err := time.LoadLocation("America/Los_Angeles")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.Print(err.Error())
-			return
-		}
-		currPST := time.Now().In(pst)
-
 		// Insert the post into the database
 		// Look at /db-server/initdb.sql for a better understanding of what you need to insert
-		result, err := db.Exec("INSERT INTO posts VALUES (?, ?, ?, ?)", post.PostBody, postID, userID, currPST)
+		result, err := db.Exec("INSERT INTO posts VALUES (?, ?, ?, ?)", post.PostBody, postID, userID, time.Now())
 
 		// Check errors with executing the query
 		if err != nil {

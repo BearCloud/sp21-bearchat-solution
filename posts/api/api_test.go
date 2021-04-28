@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -35,9 +36,24 @@ func TestGetPosts(t *testing.T) {
 	suite.Run(t, new(GetPostsSuite))
 }
 
+// Runs all of the tests for the createPost() function.
+func TestCreatePost(t *testing.T) {
+	suite.Run(t, new(CreatePostSuite))
+}
+
+// Runs all of the tests for the getFeed() function.
+func TestGetFeed(t *testing.T) {
+	suite.Run(t, new(GetFeedSuite))
+}
+
+// Runs all of the tests for the deletePost() function.
+func TestDeletePost(t *testing.T) {
+	suite.Run(t, new(DeletePostSuite))
+}
+
 // Tests that getPosts gives back the latest 25 posts in the database if there are
 // more than 25 posts in it.
-func (s *GetPostsSuite) TestBasicGetPosts() {
+func (s *GetPostsSuite) TestBasic() {
 	// Insert 30 fake posts into the database.
 	expectedPosts := s.insertFakePosts(30, "0", true)
 
@@ -62,7 +78,7 @@ func (s *GetPostsSuite) TestBasicGetPosts() {
 
 // Makes sure that the code gives valid error messages when a user
 // is not authorized to see posts.
-func (s *GetPostsSuite) TestUnauthorizedGetPosts() {
+func (s *GetPostsSuite) TestUnauthorized() {
 	s.Run("No Cookie", func() {
 		// Generate a request without setting the cookie.
 		rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
@@ -103,14 +119,35 @@ func (s *GetPostsSuite) TestUnauthorizedGetPosts() {
 	})
 }
 
+// Makes sure that if the author has made less than 25 posts, getPosts()
+// returns all of them.
+func (s *GetPostsSuite) TestLessThan25Posts() {
+	// Insert only 10 posts into the database.
+	expectedPosts := s.insertFakePosts(10, "0", true)
+
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/0", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"uuid": "0", "startIndex": "0"})
+
+	getPosts(s.db)(rr, r)
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure we got all 10 posts in the correct order.
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+	s.verifyPosts(expectedPosts, returnedPosts)
+}
+
 // Tests that getPosts() only returns posts from the specified author
 // and no one else.
-func (s *GetPostsSuite) TestRightGetPosts() {
-	// Fill the database with some posts.
+func (s *GetPostsSuite) TestOnlyFromAuthor() {
+	// Fill the database with some posts. After these calls, the database
+	// will have 50 posts from AuthorIDs 0, 1, and 11. It will also have 1
+	// post from AuthorID 10.
 	s.insertFakePosts(50, "0", true)
 	s.insertFakePosts(50, "1", true)
-	expectedPosts := s.insertFakePosts(1, "10", true)
 	s.insertFakePosts(50, "11", true)
+	expectedPosts := s.insertFakePosts(1, "10", true)
 
 	// Make a request to the posts endpoint for UUID 10 and get all posts starting from 0.
 	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/10/0", nil)
@@ -129,6 +166,159 @@ func (s *GetPostsSuite) TestRightGetPosts() {
 
 	// Verify the posts we got back match expectations.
 	s.verifyPosts(expectedPosts, returnedPosts)
+}
+
+// Makes sure that getPosts() can offset the posts by some amount.
+func (s *GetPostsSuite) TestOffset() {
+	// Insert 30 fake posts into the database.
+	expectedPosts := s.insertFakePosts(30, "0", true)
+
+	// Make a request to the posts endpoint for UUID 0 and get all posts starting from 10.
+	rr, r := s.generateRequestAndResponse(http.MethodGet, "/api/posts/0/10", nil)
+	r.AddCookie(s.generateFakeAccessToken("0"))
+	r = mux.SetURLVars(r, map[string]string{"uuid": "0", "startIndex": "10"})
+
+	getPosts(s.db)(rr, r)
+
+	// Make sure we got 20 of the posts back.
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+	var returnedPosts []Post
+	s.Require().NoError(json.NewDecoder(rr.Result().Body).Decode(&returnedPosts), "could not decode response body")
+	s.verifyPosts(expectedPosts[10:30], returnedPosts)
+}
+
+// Makes sure that create post can simply insert a post into the database.
+func (s *CreatePostSuite) TestBasic() {
+	// Create a post that we will insert into the database.
+	postToInsert := s.randomPost()
+
+	// Generate a request that will hold our post and attach a cookie for userID 0.
+	rr, r := s.generateRequestAndResponse(http.MethodPost, "/api/posts/create", bytes.NewBuffer(s.postJSON(postToInsert)))
+	r.AddCookie(s.generateFakeAccessToken("0"))
+
+	// Call the function to create the post in the database.
+	createPost(s.db)(rr, r)
+
+	s.Require().Equal(http.StatusCreated, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure the post is in the database.
+	postToInsert.AuthorID = "0"
+	s.Require().True(s.verifyPostExists(postToInsert), "post was not inserted")
+}
+
+// Makes sure createPost() does not allow unauthorized post creation.
+func (s *CreatePostSuite) TestUnauthorized() {
+	// This is similar to TestBasic except we don't attach a cookie
+	// to the request.
+	s.Run("No Cookie", func() {
+		postToInsert := s.randomPost()
+		rr, r := s.generateRequestAndResponse(http.MethodPost, "/api/posts/create", bytes.NewBuffer(s.postJSON(postToInsert)))
+		createPost(s.db)(rr, r)
+		// No cookie should result in a StatusBadRequest.
+		s.Require().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+		// Make sure the post is NOT in the database.
+		postToInsert.AuthorID = "0"
+		s.Require().False(s.verifyPostExists(postToInsert))
+	})
+
+	// This one just tests if the route returns an error if the JSON is bad.
+	s.Run("Bad JSON", func() {
+		rr, r := s.generateRequestAndResponse(http.MethodPost, "/api/posts/create", bytes.NewBuffer([]byte(`{oops:a bad json`)))
+		r.AddCookie(s.generateFakeAccessToken("0"))
+		createPost(s.db)(rr, r)
+		s.Require().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code returned")
+	})
+}
+
+// Makes sure that a basic SQL injection attack against createPost() fails.
+// If you are failing this test make sure you are using ? in your SQL
+// queries instead of directly inserting string values into queries!
+func (s *CreatePostSuite) TestSQLInjection() {
+	// Create a post that we will insert into the database. Notice
+	// the body contains SQL commands :o. Don't execute the commands
+	// in this post!!!
+	postToInsert := Post{
+		PostBody: `; INSERT INTO posts VALUES ("Evil Content", "100", "100", NULL); --`,
+		AuthorID: `; INSERT INTO posts VALUES ("Evil Content", "101", "101", NULL); --`,
+		PostID:   `; INSERT INTO posts VALUES ("Evil Content", "102", "102", NULL); --`,
+	}
+
+	// Generate a request that will hold our post and attach a cookie for userID 0.
+	rr, r := s.generateRequestAndResponse(http.MethodPost, "/api/posts/create", bytes.NewBuffer(s.postJSON(postToInsert)))
+	r.AddCookie(s.generateFakeAccessToken("0"))
+
+	// Call the function to create the post in the database.
+	createPost(s.db)(rr, r)
+
+	// Notice that this should NOT error. The post should be put in like normal even with the SQL.
+	s.Require().Equal(http.StatusCreated, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure the post is in the database.
+	postToInsert.AuthorID = "0"
+	s.Require().True(s.verifyPostExists(postToInsert), "post was not inserted")
+}
+
+// Makes sure deletePost() can simply delete a post in the database.
+func (s *DeletePostSuite) TestBasic() {
+	// Adds a single post for us to delete.
+	postToDelete := s.insertFakePosts(1, "0", true)[0]
+
+	// Generate a request to delete the post.
+	rr, r := s.generateRequestAndResponse(http.MethodDelete, "/api/posts/delete/"+postToDelete.PostID, nil)
+	r = mux.SetURLVars(r, map[string]string{"postID": postToDelete.PostID})
+	r.AddCookie(s.generateFakeAccessToken("0"))
+
+	// Delete the post.
+	deletePost(s.db)(rr, r)
+	s.Require().Equal(http.StatusOK, rr.Result().StatusCode, "incorrect status code returned")
+
+	// Make sure the post was indeed deleted.
+	s.Require().False(s.verifyPostExists(postToDelete))
+}
+
+// Tests that deletePost() returns an error if there is no post with the given ID.
+func (s *DeletePostSuite) TestNoPost() {
+	// Generate a request to delete the post.
+	rr, r := s.generateRequestAndResponse(http.MethodDelete, "/api/posts/delete/0", nil)
+	r = mux.SetURLVars(r, map[string]string{"postID": "0"})
+	r.AddCookie(s.generateFakeAccessToken("0"))
+
+	// Delete the post.
+	deletePost(s.db)(rr, r)
+	s.Require().Equal(http.StatusNotFound, rr.Result().StatusCode, "incorrect status code returned")
+}
+
+// Tests that a user who is not authorized to delete posts is not allowed to.
+func (s *DeletePostSuite) TestUnauthorized() {
+	postToDelete := s.insertFakePosts(1, "0", true)[0]
+	s.Run("No Cookie", func() {
+		// Generate the request without putting a cookie in it.
+		rr, r := s.generateRequestAndResponse(http.MethodDelete, "/api/posts/delete/"+postToDelete.PostID, nil)
+		r = mux.SetURLVars(r, map[string]string{"postID": postToDelete.PostID})
+		deletePost(s.db)(rr, r)
+
+		// No cookie means BadRequest.
+		s.Require().Equal(http.StatusBadRequest, rr.Result().StatusCode, "incorrect status code")
+
+		// Make sure the post still exists.
+		s.Require().True(s.verifyPostExists(postToDelete), "post was deleted")
+	})
+
+	// Makes sure the person trying to delete the post is the one who made it.
+	s.Run("Author Mistmatch", func() {
+		// Generate the request with a cookie for a different user than the one
+		// who created the Post.
+		rr, r := s.generateRequestAndResponse(http.MethodDelete, "/api/posts/delete/"+postToDelete.PostID, nil)
+		r = mux.SetURLVars(r, map[string]string{"postID": postToDelete.PostID})
+		r.AddCookie(s.generateFakeAccessToken("1"))
+		deletePost(s.db)(rr, r)
+
+		// Wrong author means they are Unauthorized
+		s.Require().Equal(http.StatusUnauthorized, rr.Result().StatusCode, "incorrect status code")
+
+		// Make sure the post still exists.
+		s.Require().True(s.verifyPostExists(postToDelete), "post was deleted")
+	})
 }
 
 // HELPER METHODS AND DEFINITIONS
@@ -168,10 +358,7 @@ func (s *PostsSuite) clearDatabase() (err error) {
 // Returns a byte array with a JSON containing the passed in Post. Useful for making basic requests.
 func (s *PostsSuite) postJSON(p Post) []byte {
 	JSON, err := json.Marshal(p)
-
-	// Makes sure the error returned here is nil.
 	s.Require().NoErrorf(err, "failed to initialize test post %s", err)
-
 	return JSON
 }
 
@@ -181,13 +368,14 @@ func (s *PostsSuite) randomPost() Post {
 	return Post{PostBody: gofakeit.Quote()}
 }
 
-// Verifies that a post with the same body as the one passed in exists in the
-// database. If the test fails or the post couldn't be found, this returns false.
+// Verifies that a post with the same body and AuthorID as the one passed in exists in the
+// database. It also makes sure the post doesn't have a NULL postID and time.
+// If the test fails or the post couldn't be found, this returns false.
 // Otherwise it returns true.
 func (s *PostsSuite) verifyPostExists(p Post) bool {
 	var exists bool
-	err := s.db.QueryRow("SELECT EXISTS(SELECT * FROM posts WHERE content=?)", p.PostBody).Scan(&exists)
-	if s.Assert().NoError(err, "error checking databse for the post") {
+	err := s.db.QueryRow("SELECT EXISTS(SELECT * FROM posts WHERE content=? AND authorID=? AND postID IS NOT NULL AND postTime IS NOT NULL)", p.PostBody, p.AuthorID).Scan(&exists)
+	if s.Assert().NoError(err, "error checking database for the post") {
 		return exists
 	}
 	return false
@@ -197,7 +385,9 @@ func (s *PostsSuite) verifyPostExists(p Post) bool {
 func (s *PostsSuite) SetupSuite() {
 	// Connects to the MySQL Docker Container. Notice that we use localhost
 	// instead of the container's IP address since it is assumed these
-	// tests run outside of the container network.
+	// tests run outside of the container network. If you weren't being lazy
+	// like us, you'd probably put this string into a .env file so it's secret
+	// and it's easy to change out if you change the database.
 	db, err := sql.Open("mysql", "root:root@tcp(localhost:3306)/postsDB?parseTime=true&loc=US%2FPacific")
 	s.Require().NoError(err, "could not connect to the database!")
 	s.db = db
